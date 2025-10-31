@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Upload for Detection</title>
+</head>
+<body>
+    <h1>Upload an Image for Detection</h1>
+    <input type="file" id="fileInput" />
+    <button onclick="uploadImage()">Upload</button>
+    <div id="result"></div>
+    <img id="detectedImage" style="display: none;"/>
+
+    <script>
+        async function uploadImage() {
+            const input = document.getElementById('fileInput');
+            const formData = new FormData();
+            formData.append('file', input.files[0]);
+
+            const response = await fetch('http://localhost:8000/detect/', {
+                method: 'POST',
+                body: formData
+            });
+
+            const blob = await response.blob();
+            const imageUrl = URL.createObjectURL(blob);
+
+            const detectedImage = document.getElementById('detectedImage');
+            detectedImage.src = imageUrl;
+            detectedImage.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
+
