@@ -38,7 +38,7 @@ for r in results:
                     name = r.names[cls_id]
                 except Exception:
                     name = r.names.get(cls_id, str(cls_id)) if isinstance(r.names, dict) else str(cls_id)
-                if conf >= 0.5:  # Only print predictions with confidence >= 0.5
+                if conf >= 0.75:  # Only print predictions with confidence >= 0.5
                     print(f"Predicted: {name} (class {cls_id}) — confidence: {float(conf):.3f}")
     # Press 'q' to quit
     if cv2.waitKey(1) & 0xFF == ord("q"):
