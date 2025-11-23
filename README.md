@@ -2,8 +2,7 @@
 
 ## detect traffic sign
 
-- `uvicorn main:app --reload`
-- open the `index.html` file in the firefox/chrome.
+ `python src/video.py`
 
 ## resources
 
