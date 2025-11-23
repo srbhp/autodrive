@@ -9,7 +9,7 @@ results = model.predict(
     source=0,  # Webcam
     show=True,  # Show live feed
     stream=True,  # Real-time streaming
-    verbose=True,  # Less terminal output
+    verbose=False,  # Less terminal output
 )
 
 print("📹 Starting webcam detection...")
@@ -17,6 +17,12 @@ print("Press 'q' to quit")
 
 # Process live stream
 for r in results:
+    # Check if any detections exist
+    if r is not None:
+        print( r.probs)  # Access predictions directly
+    else:
+        print("No results returned from the model.")
+
     # Press 'q' to quit
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
