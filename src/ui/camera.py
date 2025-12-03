@@ -46,6 +46,87 @@ REAL_CAR_WIDTH = (
 # Thread-safe queues
 frame_q = queue.Queue(maxsize=2)
 detections_q = queue.Queue(maxsize=4)
+lane_q = queue.Queue(maxsize=2)
+
+
+# Lane detection using edge detection and Hough line transform
+def lane_detector():
+    """Detect lane markings from camera frames and compute left/right lane positions."""
+    while True:
+        try:
+            frame = frame_q.get(timeout=0.1)
+        except queue.Empty:
+            continue
+
+        # Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Canny edge detection
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # Region of interest (focus on bottom half of frame for lane detection)
+        h, w = edges.shape
+        roi = edges[h // 2 :, :]
+
+        # Hough line transform to detect lane lines
+        lines = cv2.HoughLinesP(
+            roi, 1, math.pi / 180, 50, minLineLength=50, maxLineGap=10
+        )
+
+        left_lane_x = None
+        right_lane_x = None
+
+        if lines is not None:
+            # Separate lines into left and right based on slope and x position
+            frame_center = w / 2.0
+            left_lines = []
+            right_lines = []
+
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                if x1 == x2:  # Skip vertical lines
+                    continue
+                slope = (y2 - y1) / (x2 - x1)
+                # Left lane: negative slope, left of center
+                if slope < -0.5 and (x1 + x2) / 2 < frame_center:
+                    left_lines.append((x1 + x2) / 2)
+                # Right lane: positive slope, right of center
+                elif slope > 0.5 and (x1 + x2) / 2 > frame_center:
+                    right_lines.append((x1 + x2) / 2)
+
+            # Average lane positions
+            if left_lines:
+                left_lane_x = sum(left_lines) / len(left_lines)
+            if right_lines:
+                right_lane_x = sum(right_lines) / len(right_lines)
+
+        # Convert pixel positions to world coordinates
+        # Camera center at CAM_WIDTH / 2, map to world x around 0
+        if left_lane_x is not None:
+            left_world_x = (left_lane_x - CAM_WIDTH / 2.0) / (CAM_WIDTH / 2.0) * 3.0
+        else:
+            left_world_x = -1.5  # default left lane
+
+        if right_lane_x is not None:
+            right_world_x = (right_lane_x - CAM_WIDTH / 2.0) / (CAM_WIDTH / 2.0) * 3.0
+        else:
+            right_world_x = 1.5  # default right lane
+
+        lane_data = {
+            "left_x": left_world_x,
+            "right_x": right_world_x,
+            "ts": time.time(),
+        }
+
+        try:
+            if lane_q.full():
+                _ = lane_q.get_nowait()
+            lane_q.put(lane_data)
+        except Exception:
+            pass
 
 
 # Simple camera grabber (Picamera2 if available else OpenCV)
@@ -217,6 +298,7 @@ class Viewer(mglw.WindowConfig):
         # start camera grabber and detection threads
         threading.Thread(target=camera_grabber, daemon=True).start()
         threading.Thread(target=detection_worker, daemon=True).start()
+        threading.Thread(target=lane_detector, daemon=True).start()
         # optional websocket server (unchanged from earlier) to receive external telemetry
         threading.Thread(
             target=lambda: asyncio.run(self.ws_server()), daemon=True
@@ -243,7 +325,17 @@ class Viewer(mglw.WindowConfig):
             await asyncio.Future()
 
     def render(self, time_delta, frame_time):
-        self.ctx.clear(0.08, 0.08, 0.1)
+        self.ctx.clear(1.0, 1.0, 1.0)
+        # Get latest lane data from camera
+        try:
+            self.latest_lanes = lane_q.get_nowait()
+        except queue.Empty:
+            if not hasattr(self, "latest_lanes"):
+                self.latest_lanes = {
+                    "left_x": -1.5,
+                    "right_x": 1.5,
+                    "ts": time.time(),
+                }
         # Interpolate ego pose
         now = time.time()
         dt = (
@@ -265,41 +357,42 @@ class Viewer(mglw.WindowConfig):
             pass
         # draw each tracked object as a box at its pos (world coords: x,z)
         # Draw road (large, flat box) and lane edges before tracked objects
-        try:
-            # road geometry: wide, very thin box on ground
-            road_width = 6.0
-            road_length = 200.0
-            road_thickness = 0.02
-            road_model = glm.translate(
-                vec3(0.0, -road_thickness / 2.0, 0.0)
-            ) * glm.scale(road_width, road_thickness, road_length)
-            self.prog["u_color"].value = (0.20, 0.20, 0.20, 1.0)
-            self.prog["m_proj"].write(proj.to_bytes())
-            self.prog["m_cam"].write(cam.to_bytes())
-            self.prog["m_model"].write(road_model.to_bytes())
-            # reuse the box geometry as a flat road
-            if not hasattr(self, "road_geom"):
-                self.road_geom = geometry.cube(size=(1.0, 1.0, 1.0))
-            self.road_geom.render(self.prog)
-
-            # lane edges: thin long boxes (two lanes)
-            lane_x_offset = 1.5
-            lane_width = 0.08
-            lane_thickness = 0.01
-            lane_model_r = glm.translate(vec3(lane_x_offset, 0.0, 0.0)) * glm.scale(
-                lane_width, lane_thickness, road_length
-            )
-            lane_model_l = glm.translate(vec3(-lane_x_offset, 0.0, 0.0)) * glm.scale(
-                lane_width, lane_thickness, road_length
-            )
-            self.prog["u_color"].value = (1.0, 1.0, 1.0, 1.0)
-            self.prog["m_model"].write(lane_model_r.to_bytes())
-            self.road_geom.render(self.prog)
-            self.prog["m_model"].write(lane_model_l.to_bytes())
-            self.road_geom.render(self.prog)
-        except Exception:
-            # if anything fails here, continue to render tracked objects
-            pass
+        # try:
+        # road geometry: wide, very thin box on ground
+        road_width = 6.0
+        road_length = 200.0
+        road_thickness = 0.02
+        road_model = glm.translate(vec3(0.0, -road_thickness / 2.0, 0.0)) * glm.scale(
+            vec3(road_width, road_thickness, road_length)
+        )
+        self.prog["u_color"].value = (0.20, 0.20, 0.20, 1.0)
+        self.prog["m_proj"].write(proj.to_bytes())
+        self.prog["m_cam"].write(cam.to_bytes())
+        self.prog["m_model"].write(road_model.to_bytes())
+        # reuse the box geometry as a flat road
+        if not hasattr(self, "road_geom"):
+            self.road_geom = geometry.cube(size=(1.0, 1.0, 1.0))
+        self.road_geom.render(self.prog)
+        # lane edges: thin long boxes (two lanes)
+        lane_x_offset_left = self.latest_lanes["left_x"]
+        lane_x_offset_right = self.latest_lanes["right_x"]
+        lane_width = 0.08
+        lane_thickness = 0.05
+        lane_y = 0.05  # height above road
+        lane_model_r = glm.translate(
+            vec3(lane_x_offset_right, lane_y, 0.0)
+        ) * glm.scale(vec3(lane_width, lane_thickness, road_length))
+        lane_model_l = glm.translate(vec3(lane_x_offset_left, lane_y, 0.0)) * glm.scale(
+            vec3(lane_width, lane_thickness, road_length)
+        )
+        self.prog["u_color"].value = (1.0, 1.0, 0.0, 1.0)  # yellow edges
+        self.prog["m_model"].write(lane_model_r.to_bytes())
+        self.road_geom.render(self.prog)
+        self.prog["m_model"].write(lane_model_l.to_bytes())
+        self.road_geom.render(self.prog)
+        # except Exception:
+        #   # if anything fails here, continue to render tracked objects
+        #    pass
         for obj in list(self.tracked.values()):
             # simple expiration: remove if older than 2s
             if time.time() - obj.last_ts > 2.0:
@@ -307,7 +400,7 @@ class Viewer(mglw.WindowConfig):
                 continue
             model_mat = (
                 glm.translate(obj.pos)
-                # * glm.scale(1.0, 1.0, 1.0)
+                * glm.scale(vec3(1.0, 1.0, 1.0))
                 # * glm.scale(1.0,  1.0)
                 * glm.rotate(0.0, vec3(0, 1, 0))
             )
