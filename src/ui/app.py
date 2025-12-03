@@ -99,6 +99,11 @@ class Viewer(mglw.WindowConfig):
         self.car_prog["m_proj"].write(proj.to_bytes())
         self.car_prog["m_cam"].write(cam.to_bytes())
         self.car_prog["m_model"].write(model.to_bytes())
+        # set car color (shader expects `u_color`)
+        try:
+            self.car_prog["u_color"].value = (0.9, 0.1, 0.1, 1.0)
+        except Exception:
+            pass
         self.car.render(self.car_prog)
         speed = self.next_pose.get("speed", 0.0)
         yaw_deg = math.degrees(yaw)

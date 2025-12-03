@@ -264,6 +264,42 @@ class Viewer(mglw.WindowConfig):
         except queue.Empty:
             pass
         # draw each tracked object as a box at its pos (world coords: x,z)
+        # Draw road (large, flat box) and lane edges before tracked objects
+        try:
+            # road geometry: wide, very thin box on ground
+            road_width = 6.0
+            road_length = 200.0
+            road_thickness = 0.02
+            road_model = glm.translate(
+                vec3(0.0, -road_thickness / 2.0, 0.0)
+            ) * glm.scale(road_width, road_thickness, road_length)
+            self.prog["u_color"].value = (0.20, 0.20, 0.20, 1.0)
+            self.prog["m_proj"].write(proj.to_bytes())
+            self.prog["m_cam"].write(cam.to_bytes())
+            self.prog["m_model"].write(road_model.to_bytes())
+            # reuse the box geometry as a flat road
+            if not hasattr(self, "road_geom"):
+                self.road_geom = geometry.cube(size=(1.0, 1.0, 1.0))
+            self.road_geom.render(self.prog)
+
+            # lane edges: thin long boxes (two lanes)
+            lane_x_offset = 1.5
+            lane_width = 0.08
+            lane_thickness = 0.01
+            lane_model_r = glm.translate(vec3(lane_x_offset, 0.0, 0.0)) * glm.scale(
+                lane_width, lane_thickness, road_length
+            )
+            lane_model_l = glm.translate(vec3(-lane_x_offset, 0.0, 0.0)) * glm.scale(
+                lane_width, lane_thickness, road_length
+            )
+            self.prog["u_color"].value = (1.0, 1.0, 1.0, 1.0)
+            self.prog["m_model"].write(lane_model_r.to_bytes())
+            self.road_geom.render(self.prog)
+            self.prog["m_model"].write(lane_model_l.to_bytes())
+            self.road_geom.render(self.prog)
+        except Exception:
+            # if anything fails here, continue to render tracked objects
+            pass
         for obj in list(self.tracked.values()):
             # simple expiration: remove if older than 2s
             if time.time() - obj.last_ts > 2.0:
