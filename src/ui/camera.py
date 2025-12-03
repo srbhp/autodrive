@@ -32,7 +32,7 @@ ASSETS = Path(__file__).parent / "assets"
 USE_PICAMERA2 = False  # set True if you want Picamera2 input
 # Optionally read frames from an MP4 instead of a live camera device. When
 # True the grabber will loop the video file continuously.
-USE_VIDEO_FILE = False
+USE_VIDEO_FILE = True
 VIDEO_FILE = Path(__file__).parent / "assets" / "input.mp4"
 
 CAM_WIDTH, CAM_HEIGHT = 1280, 720
