@@ -226,21 +226,3 @@ def lane_finding_pipeline(image):
     output = weighted_img(img=houghed_lines, initial_img=image, α=0.8, β=1.0, γ=0.0)
 
     return output
-
-
-cap = cv2.VideoCapture("./assets/input.mp4")
-
-while cap.isOpened():
-    ret, frame = cap.read()
-    if ret:
-        try:
-            combo_image = lane_finding_pipeline(frame)
-        except Exception as e:
-            logging.exception("Error processing frame : %s", e)
-        cv2.imshow("result", combo_image)
-        if cv2.waitKey(1) == ord("q"):
-            break
-    else:
-        break
-cap.release()
-cv2.destroyAllWindows()
