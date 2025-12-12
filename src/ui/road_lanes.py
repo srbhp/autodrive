@@ -1,156 +1,246 @@
+import logging
+
 import cv2
 import numpy as np
 
 
-def canny(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    blur = cv2.GaussianBlur(gray, [5, 5], 0)
-    canny = cv2.Canny(blur, 50, 150)
-    return canny
+def grayscale(img):
+    """Convert a BGR image to grayscale and validate input.
 
-
-def make_coordinates(image, line_parameters):
-    slope, intercept = line_parameters
-    # validate slope/intercept
-    if not np.isfinite(slope) or not np.isfinite(intercept) or abs(slope) < 1e-6:
-        # fall back to a vertical-ish default line in the center quarter
-        h, w = image.shape[0], image.shape[1]
-        y1 = h
-        y2 = int(h * (3 / 5))
-        x1 = x2 = int(w * 0.5)
-        return np.array([x1, y1, x2, y2])
-
-    h = image.shape[0]
-    y1 = h
-    y2 = int(y1 * (3 / 5))
-    x1 = int((y1 - intercept) / slope)
-    x2 = int((y2 - intercept) / slope)
-
-    # clamp coordinates to image bounds
-    w = image.shape[1]
-    x1 = max(0, min(w - 1, x1))
-    x2 = max(0, min(w - 1, x2))
-    y1 = max(0, min(h - 1, y1))
-    y2 = max(0, min(h - 1, y2))
-    return np.array([x1, int(y1), x2, y2])
-
-
-def average_slope_intercept(image, lines, poly_order=2):
+    OpenCV `VideoCapture` returns BGR images, so use COLOR_BGR2GRAY.
+    If `img` is None or empty, return None.
     """
-    Fit smooth lane curves (polynomial mapping y -> x) from Hough line segments.
-    Returns an array-like [left_pts, right_pts] where each is Nx2 (x,y) points
-    suitable for cv2.polylines. If fitting fails, returns reasonable defaults.
+    if img is None:
+        logging.debug("grayscale: received None image")
+        return None
+    if not hasattr(img, "shape") or img.size == 0:
+        logging.debug("grayscale: received empty image")
+        return None
+    # OpenCV VideoCapture returns BGR images
+    try:
+        return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    except cv2.error as e:
+        logging.error("grayscale: cvtColor failed: %s", e)
+        return None
+    # Or use BGR2GRAY if you read an image with cv2.imread()
+    # return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+
+def canny(img, low_threshold, high_threshold):
+    """Applies the Canny transform"""
+    return cv2.Canny(img, low_threshold, high_threshold)
+
+
+def gaussian_blur(img, kernel_size):
+    """Applies a Gaussian Noise kernel"""
+    return cv2.GaussianBlur(img, (kernel_size, kernel_size), 0)
+
+
+def region_of_interest(img, vertices):
     """
-    h, w = image.shape[0], image.shape[1]
-    # default straight lanes (as point arrays)
-    def default_lane(x_frac):
-        y1 = h
-        y2 = int(h * (3 / 5))
-        x = int(w * x_frac)
-        return np.array([[x, y1], [x, y2]], dtype=np.int32)
+    Applies an image mask.
 
-    if lines is None or len(lines) == 0:
-        return np.array([default_lane(0.25), default_lane(0.75)], dtype=object)
+    Only keeps the region of the image defined by the polygon
+    formed from `vertices`. The rest of the image is set to black.
+    `vertices` should be a numpy array of integer points.
+    """
+    # defining a blank mask to start with
+    mask = np.zeros_like(img)
 
-    left_points = []
-    right_points = []
+    # defining a 3 channel or 1 channel color to fill the mask with depending on the input image
+    if len(img.shape) > 2:
+        channel_count = img.shape[2]  # i.e. 3 or 4 depending on your image
+        ignore_mask_color = (255,) * channel_count
+    else:
+        ignore_mask_color = 255
 
-    for line in lines:
-        try:
-            x1, y1, x2, y2 = line.reshape(4)
-        except Exception:
-            continue
-        # skip degenerate segments
-        if x1 == x2 and y1 == y2:
-            continue
-        # classify by slope sign (in image coords y increases downwards)
-        if x2 == x1:
-            slope = np.inf
-        else:
-            slope = (y2 - y1) / (x2 - x1)
-        mid_x = (x1 + x2) / 2.0
-        if slope < 0 and mid_x < w * 0.6:
-            left_points.append((mid_x, (y1 + y2) / 2.0))
-        elif slope > 0 and mid_x > w * 0.4:
-            right_points.append((mid_x, (y1 + y2) / 2.0))
-        else:
-            # fallback: put into nearest side by x
-            if mid_x < w / 2.0:
-                left_points.append((mid_x, (y1 + y2) / 2.0))
-            else:
-                right_points.append((mid_x, (y1 + y2) / 2.0))
+    # filling pixels inside the polygon defined by "vertices" with the fill color
+    cv2.fillPoly(mask, vertices, ignore_mask_color)
 
-    def fit_curve(points):
-        # points: list of (x,y) in image coords; we fit x = f(y)
-        if len(points) < poly_order + 1:
-            return None
-        pts = np.array(points)
-        xs = pts[:, 0]
-        ys = pts[:, 1]
-        # fit polynomial mapping y -> x
-        try:
-            coeffs = np.polyfit(ys, xs, poly_order)
-        except Exception:
-            return None
-        # generate smooth y values and compute x
-        y_vals = np.linspace(h, int(h * 0.55), num=100)
-        x_vals = np.polyval(coeffs, y_vals)
-        pts_out = np.vstack([x_vals, y_vals]).T
-        pts_out[:, 0] = np.clip(pts_out[:, 0], 0, w - 1)
-        pts_out[:, 1] = np.clip(pts_out[:, 1], 0, h - 1)
-        return pts_out.astype(np.int32)
-
-    left_curve = fit_curve(left_points)
-    right_curve = fit_curve(right_points)
-
-    if left_curve is None:
-        left_curve = default_lane(0.25)
-    if right_curve is None:
-        right_curve = default_lane(0.75)
-
-    return np.array([left_curve, right_curve], dtype=object)
-
-
-def display_lines(image, lines):
-    line_image = np.zeros_like(image)
-    if lines is not None:
-        # Expect lines to be arrays of points for polylines (Nx2)
-        for pts in lines:
-            try:
-                pts_arr = np.asarray(pts, dtype=np.int32)
-            except Exception:
-                continue
-            if pts_arr.ndim != 2 or pts_arr.shape[1] != 2:
-                continue
-            # reshape for polylines: (num_points,1,2)
-            poly = pts_arr.reshape((-1, 1, 2))
-            cv2.polylines(line_image, [poly], isClosed=False, color=(0, 255, 255), thickness=6)
-    return line_image
-
-
-def region_of_intrest(image):
-    height = image.shape[0]
-    polygons = np.array([[(200, height), (1100, height), (550, 250)]])
-    mask = np.zeros_like(image)
-    cv2.fillPoly(mask, polygons, 255)
-    masked_image = cv2.bitwise_and(image, mask)  #
+    # returning the image only where mask pixels are nonzero
+    masked_image = cv2.bitwise_and(img, mask)
     return masked_image
 
 
-cap = cv2.VideoCapture("./assets/lanes1.mp4")
+def draw_lines(img, lines, color=[255, 0, 0], thickness=10):
+    """
+    NOTE: this is the function you might want to use as a starting point once you want to
+    average/extrapolate the line segments you detect to map out the full
+    extent of the lane (going from the result shown in raw-lines-example.mp4
+    to that shown in P1_example.mp4).
+
+    Think about things like separating line segments by their
+    slope ((y2-y1)/(x2-x1)) to decide which segments are part of the left
+    line vs. the right line.  Then, you can average the position of each of
+    the lines and extrapolate to the top and bottom of the lane.
+
+    This function draws `lines` with `color` and `thickness`.
+    Lines are drawn on the image inplace (mutates the image).
+    If you want to make the lines semi-transparent, think about combining
+    this function with the weighted_img() function below
+    """
+    for line in lines:
+        for x1, y1, x2, y2 in line:
+            cv2.line(img, (x1, y1), (x2, y2), color, thickness)
+
+
+def slope_lines(image, lines):
+    img = image.copy()
+    poly_vertices = []
+    order = [0, 1, 3, 2]
+
+    left_lines = []  # Like /
+    right_lines = []  # Like \
+    if lines is None or len(lines) == 0:
+        # Nothing to draw, return the original image
+        return image
+    for line in lines:
+        for x1, y1, x2, y2 in line:
+            if x1 == x2:
+                pass  # Vertical Lines
+            else:
+                m = (y2 - y1) / (x2 - x1)
+                c = y1 - m * x1
+
+                if m < 0:
+                    left_lines.append((m, c))
+                elif m >= 0:
+                    right_lines.append((m, c))
+
+    if len(left_lines) == 0 or len(right_lines) == 0:
+        # Not enough information to form lane lines
+        logging.debug(
+            "slope_lines: Not enough lines to compute lanes (left=%s, right=%s)",
+            len(left_lines),
+            len(right_lines),
+        )
+        return image
+
+    left_line = np.mean(left_lines, axis=0)
+    right_line = np.mean(right_lines, axis=0)
+
+    # print(left_line, right_line)
+
+    for slope, intercept in [left_line, right_line]:
+        # getting complete height of image in y1
+        rows, cols = image.shape[:2]
+        y1 = int(rows)  # image.shape[0]
+
+        # taking y2 upto 60% of actual height or 60% of y1
+        y2 = int(rows * 0.6)  # int(0.6*y1)
+
+        # we know that equation of line is y=mx +c so we can write it x=(y-c)/m
+        x1 = int((y1 - intercept) / slope)
+        x2 = int((y2 - intercept) / slope)
+        poly_vertices.append((x1, y1))
+        poly_vertices.append((x2, y2))
+        draw_lines(img, np.array([[[x1, y1, x2, y2]]]))
+
+    poly_vertices = [poly_vertices[i] for i in order]
+    cv2.fillPoly(img, pts=np.array([poly_vertices], "int32"), color=(0, 255, 0))
+    return cv2.addWeighted(image, 0.7, img, 0.4, 0.0)
+
+    # cv2.polylines(img,np.array([poly_vertices],'int32'), True, (0,0,255), 10)
+    # print(poly_vertices)
+
+
+def hough_lines(img, rho, theta, threshold, min_line_len, max_line_gap):
+    """
+    `img` should be the output of a Canny transform.
+
+    Returns an image with hough lines drawn.
+    """
+    lines = cv2.HoughLinesP(
+        img,
+        rho,
+        theta,
+        threshold,
+        np.array([]),
+        minLineLength=min_line_len,
+        maxLineGap=max_line_gap,
+    )
+    line_img = np.zeros((img.shape[0], img.shape[1], 3), dtype=np.uint8)
+    # draw_lines(line_img, lines)
+    if lines is None:
+        # No lines found; return empty overlay, caller will weight with original image
+        return line_img
+    line_img = slope_lines(line_img, lines)
+    return line_img
+
+
+def weighted_img(img, initial_img, α=0.1, β=1.0, γ=0.0):
+    """
+    `img` is the output of the hough_lines(), An image with lines drawn on it.
+    Should be a blank image (all black) with lines drawn on it.
+
+    `initial_img` should be the image before any processing.
+
+    The result image is computed as follows:
+
+    initial_img * α + img * β + γ
+    NOTE: initial_img and img must be the same shape!
+    """
+    lines_edges = cv2.addWeighted(initial_img, α, img, β, γ)
+    # lines_edges = cv2.polylines(lines_edges,get_vertices(img), True, (0,0,255), 10)
+    return lines_edges
+
+
+def get_vertices(image):
+    rows, cols = image.shape[:2]
+    bottom_left = [cols * 0.15, rows]
+    top_left = [cols * 0.45, rows * 0.6]
+    bottom_right = [cols * 0.95, rows]
+    top_right = [cols * 0.55, rows * 0.6]
+
+    ver = np.array([[bottom_left, top_left, top_right, bottom_right]], dtype=np.int32)
+    return ver
+
+
+# Lane finding Pipeline
+def lane_finding_pipeline(image):
+    # Validate
+    if image is None:
+        logging.warning("lane_finding_pipeline: received None image")
+        return None
+
+    # Grayscale
+    gray_img = grayscale(image)
+    if gray_img is None:
+        return None
+    # Gaussian Smoothing
+    smoothed_img = gaussian_blur(img=gray_img, kernel_size=5)
+    # Canny Edge Detection
+    canny_img = canny(img=smoothed_img, low_threshold=180, high_threshold=240)
+    # Masked Image Within a Polygon
+    masked_img = region_of_interest(img=canny_img, vertices=get_vertices(image))
+    # Hough Transform Lines
+    houghed_lines = hough_lines(
+        img=masked_img,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=20,
+        min_line_len=20,
+        max_line_gap=180,
+    )
+    # Draw lines on edges
+    output = weighted_img(img=houghed_lines, initial_img=image, α=0.8, β=1.0, γ=0.0)
+
+    return output
+
+
+cap = cv2.VideoCapture("./assets/input.mp4")
 
 while cap.isOpened():
-    _, frame = cap.read()
-    canny_image = canny(frame)
-    cropped_image = region_of_intrest(canny_image)
-    lines = cv2.HoughLinesP(
-        cropped_image, 2, np.pi / 180, 100, np.array([]), minLineLength=40, maxLineGap=5
-    )
-    averaged_lines = average_slope_intercept(frame, lines)
-    line_image = display_lines(frame, averaged_lines)
-    combo_image = cv2.addWeighted(frame, 0.8, line_image, 1, 1)
-    cv2.imshow("result", combo_image)
-    if cv2.waitKey(1) == ord("q"):
+    ret, frame = cap.read()
+    if ret:
+        try:
+            combo_image = lane_finding_pipeline(frame)
+        except Exception as e:
+            logging.exception("Error processing frame : %s", e)
+        cv2.imshow("result", combo_image)
+        if cv2.waitKey(1) == ord("q"):
+            break
+    else:
         break
 cap.release()
 cv2.destroyAllWindows()
