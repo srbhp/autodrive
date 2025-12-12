@@ -15,6 +15,7 @@ import argparse
 import logging
 import time
 import warnings
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -173,6 +174,87 @@ def fit_lane_polynomial(points):
     return left_poly, right_poly, left, right
 
 
+def median_point_filter(points: np.ndarray, num_bins: int = 8):
+    """Reduce outliers by binning points along y and taking median x per bin.
+    Returns filtered points as Nx2 array sorted by y.
+    """
+    if points is None or len(points) == 0:
+        return points
+    ys = points[:, 1]
+    bins = np.linspace(ys.min(), ys.max(), num_bins + 1)
+    filtered = []
+    for i in range(num_bins):
+        mask = (
+            (ys >= bins[i]) & (ys < bins[i + 1])
+            if i < num_bins - 1
+            else (ys >= bins[i]) & (ys <= bins[i + 1])
+        )
+        if not np.any(mask):
+            continue
+        xs = points[mask][:, 0]
+        ys_bin = points[mask][:, 1]
+        # use median x and median y for the bin
+        mx = np.median(xs)
+        my = np.median(ys_bin)
+        filtered.append((mx, my))
+    if len(filtered) == 0:
+        return np.empty((0, 2), dtype=float)
+    filtered = np.array(filtered, dtype=float)
+    # sort by y
+    filtered = filtered[np.argsort(filtered[:, 1])]
+    return filtered
+
+
+class PolynomialSmoother:
+    """Simple EMA smoother for polynomial coefficients (degree 2).
+
+    It keeps a current estimate of coefficients [A,B,C] and updates via
+    new_coeffs = alpha*new + (1-alpha)*old.
+    If a measurement is missing, it will keep the previous value for up to
+    `max_missing_frames` frames, then reset.
+    """
+
+    def __init__(self, alpha: float = 0.85, max_missing_frames: int = 8):
+        self.alpha = float(alpha)
+        self.max_missing_frames = int(max_missing_frames)
+        self.coeffs = None
+        self.missing = 0
+
+    def _to_degree2(self, poly: np.poly1d):
+        if poly is None:
+            return None
+        # Ensure polynomial coefficients are length 3 representing degree 2
+        coeffs = np.atleast_1d(poly.c).astype(float)
+        if coeffs.shape[0] == 3:
+            return coeffs.copy()
+        # if linear (degree 1), pad with zero A coeff
+        if coeffs.shape[0] == 2:
+            return np.array([0.0, coeffs[0], coeffs[1]], dtype=float)
+        # if constant or other, pad/truncate to degree2
+        if coeffs.shape[0] < 3:
+            coeffs = np.concatenate((np.zeros(3 - len(coeffs)), coeffs))
+            return coeffs
+        return coeffs[-3:]
+
+    def update(self, poly: Optional[np.poly1d]):
+        new_coeffs = self._to_degree2(poly)
+        if new_coeffs is None:
+            # no new measurement
+            self.missing += 1
+            if self.missing > self.max_missing_frames:
+                self.coeffs = None
+                return None
+            if self.coeffs is None:
+                return None
+            return np.poly1d(self.coeffs)
+        self.missing = 0
+        if self.coeffs is None:
+            self.coeffs = new_coeffs
+        else:
+            self.coeffs = self.alpha * new_coeffs + (1.0 - self.alpha) * self.coeffs
+        return np.poly1d(self.coeffs)
+
+
 def compute_curvature_and_offset(left_poly, right_poly, bev_shape):
     """Compute curvature radius (px) and vehicle offset (meters approximated)
     from left and right polynomials (x(y)). Returns (curvature_m, offset_m, lane_width_pixels)
@@ -238,6 +320,23 @@ def main():
         "--save", default=None, help="Optional output path to save video"
     )
     parser.add_argument("--display", action="store_true", help="Show GUI windows")
+    parser.add_argument(
+        "--offset-threshold",
+        default=0.4,
+        type=float,
+        help="Lateral offset in meters to trigger lane departure (default 0.4m)",
+    )
+    parser.add_argument(
+        "--frames-to-trigger",
+        default=3,
+        type=int,
+        help="Number of consecutive frames over threshold to trigger warning",
+    )
+    parser.add_argument(
+        "--beep",
+        action="store_true",
+        help="Play a terminal beep (\a) when lane departure is triggered",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -271,6 +370,15 @@ def main():
     bev_M = None
     bev_Minv = None
     bev_size = None
+    # smoothing state for left and right lane polynomials
+    left_smoother = PolynomialSmoother(alpha=0.75)
+    right_smoother = PolynomialSmoother(alpha=0.75)
+    # state for lane departure warnings
+    departure_counter = 0
+    departure_active = False
+    lost_lane_counter = 0
+    lost_lane_active = False
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -300,6 +408,8 @@ def main():
                     points.append((cx, cy))
                 if len(points) > 0:
                     pts = np.array(points, dtype=np.float32)
+                    # remove outlier points by binning (y) and taking medians
+                    pts = median_point_filter(pts, num_bins=8)
                     # compute BEV transforms if needed
                     if bev_M is None:
                         bev_M, bev_Minv, bev_size = get_birdseye_transform(frame)
@@ -307,6 +417,9 @@ def main():
                     left_poly, right_poly, left_pts, right_pts = fit_lane_polynomial(
                         bev_pts
                     )
+                    # smooth polynomial coefficients across frames to reduce jitter
+                    left_poly = left_smoother.update(left_poly)
+                    right_poly = right_smoother.update(right_poly)
                     if left_poly is not None and right_poly is not None:
                         curvature, offset, lane_width_px = compute_curvature_and_offset(
                             left_poly, right_poly, bev_size
@@ -334,6 +447,11 @@ def main():
                             x1, y1 = map(int, mid_img[i])
                             x2, y2 = map(int, mid_img[i + 1])
                             cv2.line(result, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                        # Draw vehicle center for reference
+                        h, w = result.shape[:2]
+                        cv2.circle(
+                            result, (int(w / 2), int(h * 0.92)), 6, (255, 255, 0), -1
+                        )
             except Exception as e:  # pylint: disable=broad-except
                 logging.exception("YOLO detection failed: %s", e)
 
@@ -379,6 +497,47 @@ def main():
                 (255, 255, 255),
                 2,
             )
+        # Lane departure warning logic
+        if offset is not None:
+            if abs(offset) > args.offset_threshold:
+                departure_counter += 1
+            else:
+                # decay counter
+                departure_counter = max(0, departure_counter - 1)
+
+            if departure_counter >= args.frames_to_trigger:
+                if not departure_active:
+                    departure_active = True
+                    logging.warning(
+                        "Lane departure detected: offset=%.3fm (threshold %.2fm)",
+                        offset,
+                        args.offset_threshold,
+                    )
+                    if args.beep:
+                        print("\a", end="")
+                # overlay warning visuals
+                direction = "LEFT" if offset > 0 else "RIGHT"
+                cv2.putText(
+                    result,
+                    f"LANE DEPARTURE: {direction}",
+                    (result.shape[1] // 4, result.shape[0] // 4),
+                    cv2.FONT_HERSHEY_TRIPLEX,
+                    1.2,
+                    (0, 0, 255),
+                    3,
+                )
+                # highlight centerline
+                for i in range(len(mid_img) - 1):
+                    x1, y1 = map(int, mid_img[i])
+                    x2, y2 = map(int, mid_img[i + 1])
+                    cv2.line(result, (x1, y1), (x2, y2), (0, 0, 255), 6)
+            else:
+                if departure_active and departure_counter == 0:
+                    departure_active = False
+                    logging.info("Lane departure cleared.")
+        else:
+            # no offset computed; decrement counters and try to mark lost lane
+            departure_counter = max(0, departure_counter - 1)
         if "yolo_times" in locals() and yolo_times is not None:
             cv2.putText(
                 result,

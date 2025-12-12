@@ -24,7 +24,7 @@ python src/lane_demo.py --source 0 --display
 Run the demo (video file) and save the output:
 
 ```bash
-python src/lane_demo.py --source ./src/assets/input.mp4 --display --save out.mp4
+python src/lane_demo.py --source ./assets/input.mp4 --display --save out.mp4
 ```
 
 Use the optional pre-trained segmentation model via torch/torchvision:
@@ -52,6 +52,18 @@ Example low-latency run (GPU):
 ```bash
 python -m pip install ultralytics torch
 python src/lane_demo.py --source 0 --use-yolo --yolo-imgsz 384 --display
+```
+
+Lane departure warnings:
+
+- `--offset-threshold`: lateral offset in meters to trigger a warning (default 0.4m)
+- `--frames-to-trigger`: consecutive frames above threshold to trigger (default 3)
+- `--beep`: optionally play a terminal beep when a warning is activated
+
+Example:
+
+```bash
+python src/lane_demo.py --source 0 --use-yolo --yolo-imgsz 384 --offset-threshold 0.35 --frames-to-trigger 5 --beep --display
 ```
 
 If you have a custom YOLO weights file trained to detect lanes or drivable edges, pass it via `--yolo-weights`.
