@@ -3,6 +3,9 @@ import logging
 import cv2
 import numpy as np
 
+pre_left_fit = None
+pre_right_fit = None
+
 
 def grayscale(img):
     """Convert a BGR image to grayscale and validate input.
@@ -55,6 +58,18 @@ def region_of_interest(img, vertices):
     return masked_image
 
 
+def regularize_lane_fit(fit, prev_fit, alpha=0.2):
+    """
+    Smooth the lane line fit by combining with previous fit.
+
+    """
+    # put a cutof on cubic term
+
+    if prev_fit is None:
+        return fit
+
+    return alpha * fit + (1 - alpha) * prev_fit
+
 
 def polyfit_lanes(input, degree=3, ycrop=0.6):
     """
@@ -69,6 +84,14 @@ def polyfit_lanes(input, degree=3, ycrop=0.6):
     # add nonzero pixel values and put it in the average value of the pixel indices
     poly_left = np.poly1d(np.polyfit(left_only[0], left_only[1], degree))
     poly_right = np.poly1d(np.polyfit(right_only[0], right_only[1], degree))
+    # regularize the lane fit
+    global pre_left_fit, pre_right_fit
+    poly_left = regularize_lane_fit(poly_left, pre_left_fit, alpha=0.4)
+    poly_right = regularize_lane_fit(poly_right, pre_right_fit, alpha=0.8)
+
+    pre_left_fit = poly_left
+    pre_right_fit = poly_right
+
     lane_left = poly_left(np.arange(input.shape[0])), np.arange(input.shape[0])
     # shift right lane x values by mid
     lane_right = poly_right(np.arange(input.shape[0])) + mid, np.arange(input.shape[0])
@@ -84,16 +107,10 @@ def polyfit_lanes(input, degree=3, ycrop=0.6):
         x_right = int(lane_right[0][y])
         out_img[y, x_left:x_right] = [255, 0, 0]
         # draw the lane lines
-        out_img[y, x_left - 2 : x_left + 2] = [
-            0,
-            255,
-            0,
-        ]  # left lane line in green
-        out_img[y, x_right - 2 : x_right + 2] = [
-            0,
-            0,
-            255,
-        ]  # right lane line in blue
+        # left lane line in green
+        out_img[y, x_left - 2 : x_left + 2] = [0, 255, 0]
+        # right lane line in blue
+        out_img[y, x_right - 2 : x_right + 2] = [0, 0, 255]
     return out_img
 
 
