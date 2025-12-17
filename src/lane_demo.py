@@ -4,7 +4,7 @@ Minimal lane-departure demo using OpenCV (training-free) with an optional
 pre-trained segmentation model (PyTorch/torchvision) to mask the road area.
 
 Usage:
-    python src/lane_demo.py --source 0            # webcam
+    python src/lane_demo.py --source 0           # webcam
     python src/lane_demo.py --source video.mp4   # video file
 
 """
@@ -28,7 +28,7 @@ def main():
     parser.add_argument(
         "--save", default=None, help="Optional output path to save video"
     )
-    parser.add_argument("--display", default = True , help="Show GUI windows")
+    parser.add_argument("--display", default=True, help="Show GUI windows")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -74,7 +74,7 @@ def main():
         )
 
         if args.display:
-            cv2.imshow("LaneDemo", result)
+            cv2.imshow("AutoDrive  ", result)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
